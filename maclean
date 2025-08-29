@@ -1,0 +1,382 @@
+#!/bin/zsh
+
+# maclean — Dev-friendly macOS cleanup & sane defaults
+#
+# Summary:
+#   Reclaim disk space, purge caches/logs, thin APFS snapshots, and apply fast Finder/Dock defaults.
+#
+# Usage:
+#   ./maclean [--clean] [--defaults] [--all] [-h|--help]
+#
+# Default behavior:
+#   With no flags, runs --clean.
+#
+# Flags:
+#   --clean       Run cleanup tasks (disk space, caches, logs, Trash, Docker, Xcode).
+#   --defaults    Apply performance/defaults tweaks (animations, Finder, Dock).
+#   --all         Run both --clean and --defaults.
+#   -h|--help     Show help and exit.
+#
+# Environment:
+#   BACKUP_AGE_DAYS            (default: 90)  Prune iOS backups older than this many days.
+#   DOCKER_PRUNE_UNTIL_HOURS   (default: 720) Prune Docker images/containers older than this many hours.
+#   SNAPSHOT_THIN_TARGET_BYTES (default: 5000000000) Target bytes to reclaim from APFS local snapshots.
+#   NO_COLOR                   Disable colorized output if set.
+#
+# Requirements:
+#   macOS, zsh; optional: Homebrew, Xcode tools, Docker, sudo, tmutil.
+#
+# Safety:
+#   Refuses to run as root; will prompt for sudo for system caches and APFS thinning.
+#
+# Tested on:
+#   macOS Sequoia
+#
+# Exit codes:
+#   0 success; non‑zero on failure/interrupt.
+#
+# License: MIT (update if different)
+# Author: Pierpaolo Pattitoni <ppattitoni@gmail.com> — https://github.com/piercoder
+
+# Part 1: Strict shell + predictable globs
+set -e
+set -u
+set -o pipefail
+setopt EXTENDED_GLOB
+setopt GLOB_DOTS
+
+# Part 2: UI formatting helpers
+if [[ -n ${NO_COLOR:-} ]] || ! command -v tput >/dev/null 2>&1; then
+  bold=""; reset=""; red=""; green=""; yellow=""; blue=""; magenta=""; cyan=""
+else
+  bold="$(tput bold)"; reset="$(tput sgr0)"
+  red="$(tput setaf 1)"; green="$(tput setaf 2)"; yellow="$(tput setaf 3)"
+  blue="$(tput setaf 4)"; magenta="$(tput setaf 5)"; cyan="$(tput setaf 6)"
+fi
+say(){ print -r -- "$@"; }
+info(){ say "${blue}i${reset} $*"; }
+ok(){ say "${green}+${reset} $*"; }
+warn(){ say "${yellow}!${reset} $*"; }
+err(){ print -r -- "${red}x${reset} $*" >&2; }
+title(){ say ""; say "${bold}${magenta}> $*${reset}"; }
+skip(){ say "${yellow}→${reset} Skipping: $*"; }
+applied(){ ok "Applied: $*"; }
+
+# Part 3: Tiny generic helpers
+have(){ command -v "$1" >/dev/null 2>&1; }
+now(){ [[ -n ${EPOCHSECONDS:-} ]] && print -r -- $EPOCHSECONDS || date +%s; }
+try(){ set +e; "$@"; local s=$?; set -e; return $s; }
+
+# Part 4: CLI flags + help
+DO_CLEAN=0
+DO_DEFAULTS=0
+AUTO_SELECTED_CLEAN=0
+SHOW_HELP=0
+PARSE_ERROR=0
+while (( $# )); do
+  case "$1" in
+    -h|--help) SHOW_HELP=1 ;;
+    --clean) DO_CLEAN=1 ;;
+    --defaults) DO_DEFAULTS=1 ;;
+    --all) DO_CLEAN=1; DO_DEFAULTS=1 ;;
+    --) shift; break ;;
+    *) err "Unknown option: $1"; SHOW_HELP=1; PARSE_ERROR=2 ;;
+  esac
+  shift || true
+done
+
+if (( SHOW_HELP )); then
+  cat <<'EOF'
+maclean — Dev-friendly macOS cleanup & sane defaults
+
+Usage:
+  ./maclean [options]
+    -h | --help          Show this help and exit
+    --clean              Run cleanup tasks (disk space, caches, logs, etc.)
+    --defaults           Apply macOS performance defaults (UI/animation tweaks)
+    --all                Run both --clean and --defaults
+
+Notes:
+  • If no flags are provided, `--clean` is assumed.
+  • You can combine `--clean` and `--defaults` (or just use `--all`).
+  • Running --defaults will disable Dock autohide (sets com.apple.dock autohide=false). Re-enable in System Settings or via: defaults write com.apple.dock autohide -bool true; killall Dock
+  • Environment overrides: BACKUP_AGE_DAYS, DOCKER_PRUNE_UNTIL_HOURS, SNAPSHOT_THIN_TARGET_BYTES
+  • Colors can be disabled by setting NO_COLOR (respected automatically)
+EOF
+  exit $PARSE_ERROR
+fi
+
+if (( DO_CLEAN == 0 && DO_DEFAULTS == 0 )); then
+  DO_CLEAN=1
+  AUTO_SELECTED_CLEAN=1
+fi
+if (( AUTO_SELECTED_CLEAN )); then
+  info "No flags provided; defaulting to --clean"
+fi
+
+# Part 5: Safety checks
+if ! command -v sw_vers >/dev/null 2>&1; then print -r -- "This is for macOS." >&2; exit 1; fi
+if [[ -z "${ZSH_VERSION:-}" ]]; then print -r -- "Please run with zsh." >&2; exit 1; fi
+if [[ $EUID -eq 0 ]]; then print -r -- "Refusing to run as root." >&2; exit 1; fi
+if [[ -z ${HOME:-} || ! -d $HOME || $HOME == "/" ]]; then print -r -- "Unsafe $HOME." >&2; exit 1; fi
+export LC_ALL=C
+
+# Part 6: Config (env-overridable)
+: "${BACKUP_AGE_DAYS:=90}"
+: "${DOCKER_PRUNE_UNTIL_HOURS:=720}"
+: "${SNAPSHOT_THIN_TARGET_BYTES:=5000000000}"
+
+# Part 7: Size/format helpers
+freed_from(){ local before=$1 after=$2; print -r -- $(( before - after )); }
+bytes_to_gib(){ local b=${1:-0}; /usr/bin/awk -v b="$b" 'BEGIN{ printf("%.2f", b/1024/1024/1024) }'; }
+kblocks_to_bytes(){ local k=$(print -r -- "${1:-0}" | /usr/bin/awk '{if ($0 ~ /^[0-9]+$/) print $0; else print 0}'); print -r -- $(( k * 1024 )); }
+size_of_dir_bytes(){ local d="$1"; [[ -d "$d" ]] || { print -r -- 0; return; }; local k=$(/usr/bin/du -sk "$d" 2>/dev/null | /usr/bin/awk 'NR==1{print $1+0}'); print -r -- $(kblocks_to_bytes "$k"); }
+clamp_nonneg(){ local v=${1:-0}; (( v < 0 )) && v=0; print -r -- $v; }
+fmt_secs(){ local s=${1:-0} h m; (( h = s/3600, s %= 3600, m = s/60, s %= 60 )); local out=""; (( h > 0 )) && out+="${h}h "; (( m > 0 )) && out+="${m}m "; out+="${s}s"; print -r -- "$out"; }
+
+# Part 8: Reporting helpers
+TOTAL_FREED=0; EXIT_STATUS=0
+_add_freed(){ local b=${1:-0}; TOTAL_FREED=$(( TOTAL_FREED + b )); }
+report_freed_total(){ local label="$1"; local freed=$(clamp_nonneg "${2:-0}"); ok "$label"; info "Freed ~$(bytes_to_gib "$freed") GiB"; _add_freed "$freed"; }
+report_freed_from(){ local label="$1"; local before=${2:-0}; local after=${3:-0}; local freed=$(clamp_nonneg "$(freed_from "$before" "$after")"); report_freed_total "$label" "$freed"; }
+
+# Part 9: Filesystem helpers
+human_df(){ /bin/df -k / 2>/dev/null | /usr/bin/awk 'NR==2{printf "/: %.2f GiB free (%.2f GiB total)", $4/1024/1024, $2/1024/1024}'; }
+sum_find_bytes(){ /usr/bin/find "$@" -type f -exec stat -f%z {} + 2>/dev/null | /usr/bin/awk '{s+=$1} END{print s+0}'; }
+
+# Part 10: Purge primitives
+_purge_dir_contents_core(){ local d="$1" before after; [[ -d "$d" ]] || { print -r -- 0; return; }; before=$(size_of_dir_bytes "$d"); setopt NULL_GLOB; /bin/rm -rf -- "$d/"*(N) 2>/dev/null || true; unsetopt NULL_GLOB; after=$(size_of_dir_bytes "$d"); print -r -- $(clamp_nonneg "$(freed_from "$before" "$after")"); }
+purge_dir_list_contents(){ local label="$1"; shift; local total=0 d freed; set +e; for d in "$@"; do [[ -d "$d" ]] || continue; freed=$(_purge_dir_contents_core "$d"); total=$(( total + freed )); done; set -e; report_freed_total "$label" "$total"; }
+purge_find_aggregate(){ local label="$1"; shift; local have_path=0 a; for a in "$@"; do [[ "$a" != -* ]] && have_path=1 && break; done; if (( ! have_path )); then set -- "$HOME" "$@"; fi; set +e; local before=$(sum_find_bytes "$@"); /usr/bin/find "$@" -type f -delete 2>/dev/null || true; /usr/bin/find "$@" -type d -empty -delete 2>/dev/null || true; local after=$(sum_find_bytes "$@"); set -e; report_freed_from "$label" "$before" "$after"; }
+report_freed_exec(){ local label="$1"; shift; local freed; freed=$("$@" 2>/dev/null) || freed=0; freed=$(clamp_nonneg "${freed:-0}"); report_freed_total "$label" "$freed"; }
+_purge_dir_contents_core_sudo(){
+  local d="$1" owner="${2:-root:wheel}" mode="${3:-755}" before after
+  [[ -d "$d" ]] || { print -r -- 0; return; }
+  before=$(size_of_dir_bytes "$d")
+  setopt NULL_GLOB; sudo /bin/rm -rf -- "$d/"*(N) 2>/dev/null || true; unsetopt NULL_GLOB
+  sudo /bin/mkdir -p "$d" 2>/dev/null || true
+  sudo /usr/sbin/chown "$owner" "$d" 2>/dev/null || true
+  sudo /bin/chmod "$mode" "$d" 2>/dev/null || true
+  after=$(size_of_dir_bytes "$d")
+  print -r -- $(clamp_nonneg "$(freed_from "$before" "$after")")
+}
+_purge_external_trashes_core(){ local uid_str="$EUID" total=0 freed before after p; set +e; while IFS= read -r -d '' vol; do [[ -L "$vol" ]] && continue; p="$vol/.Trashes/$uid_str"; [[ -d "$p" ]] || continue; before=$(size_of_dir_bytes "$p"); setopt NULL_GLOB; /bin/rm -rf -- "$p/"*(N) 2>/dev/null || true; unsetopt NULL_GLOB; after=$(size_of_dir_bytes "$p"); freed=$(clamp_nonneg "$(freed_from "$before" "$after")"); total=$(( total + freed )); done < <(/usr/bin/find /Volumes -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null); set -e; print -r -- "$total"; }
+purge_pruned_cache_dirs(){ local label="$1" root="$2" match="$3" total=0 before after freed d; set +e; while IFS= read -r -d '' d; do [[ -d "$d" ]] || continue; before=$(size_of_dir_bytes "$d"); setopt NULL_GLOB; /bin/rm -rf -- "$d/"*(N) 2>/dev/null || true; unsetopt NULL_GLOB; after=$(size_of_dir_bytes "$d"); freed=$(clamp_nonneg "$(freed_from "$before" "$after")"); total=$(( total + freed )); done < <(/usr/bin/find "$root" -type d -path "$match" -prune -print0 2>/dev/null); set -e; report_freed_total "$label" "$total"; }
+purge_logs_older_than_in_dirs(){ local label="$1" root="$2" match="$3" days="$4" total=0 before after d delta; set +e; while IFS= read -r -d '' d; do [[ -d "$d" ]] || continue; before=$(sum_find_bytes "$d" -mtime +"$days"); /usr/bin/find "$d" -type f -mtime +"$days" -delete 2>/dev/null || true; after=$(sum_find_bytes "$d" -mtime +"$days"); delta=$(( before - after )); (( delta < 0 )) && delta=0; total=$(( total + delta )); done < <(/usr/bin/find "$root" -type d -path "$match" -prune -print0 2>/dev/null); set -e; report_freed_total "$label" "${total:-0}"; }
+purge_dirs_older_than(){ local label="$1" root="$2" days="$3"; set +e; local bytes=$( /usr/bin/find "$root" -mindepth 1 -maxdepth 1 -type d -mtime +"$days" -print0 2>/dev/null | /usr/bin/xargs -0 -I{} /usr/bin/du -sk "{}" 2>/dev/null | /usr/bin/awk '{s+=$1} END{print (s+0)*1024}' ); /usr/bin/find "$root" -mindepth 1 -maxdepth 1 -type d -mtime +"$days" -print0 2>/dev/null | /usr/bin/xargs -0 -I{} /bin/rm -rf -- "{}" 2>/dev/null; set -e; report_freed_total "$label" "${bytes:-0}"; }
+
+# Part 11: Runtime info + traps
+macos_version=$(sw_vers -productVersion 2>/dev/null || echo "unknown")
+before_free_str="$(human_df)"; info "maclean running on macOS ${macos_version}"
+start_time=$(now)
+cleanup_summary(){ if [[ -n "${_MACLEAN_SUMMARY_PRINTED:-}" ]]; then return 0; fi; _MACLEAN_SUMMARY_PRINTED=1; say ""; if (( DO_CLEAN )); then say "${bold}Cleanup complete.${reset}"; elif (( DO_DEFAULTS )); then say "${bold}Defaults applied.${reset}"; else say "${bold}Done.${reset}"; fi; local after_free_str elapsed; after_free_str="$(human_df 2>/dev/null || echo "N/A")"; elapsed=$(( $(now) - start_time )); if (( DO_CLEAN )); then say "Disk before: ${yellow}${before_free_str}${reset}"; say "Disk after:  ${green}${after_free_str}${reset}"; say "Estimated freed by this run: ${green}~$(bytes_to_gib "$TOTAL_FREED") GiB${reset}"; fi; say "Elapsed: ${cyan}$(fmt_secs "$elapsed")${reset}"; }
+trap ' if (( DO_CLEAN && DO_DEFAULTS )); then err "Interrupted. Defaults and cleanup may be incomplete."; elif (( DO_CLEAN )); then err "Interrupted. Cleanup may be incomplete."; elif (( DO_DEFAULTS )); then err "Interrupted. Defaults application may be incomplete."; else err "Interrupted."; fi; exit 1 ' INT
+trap 'EXIT_STATUS=$?; cleanup_summary; exit $EXIT_STATUS' EXIT
+
+# Part 12: Performance defaults (optional)
+if (( DO_DEFAULTS )); then
+  title "0. Performance defaults"
+  info "Disabling/shortening animations, reducing transparency, and speeding up key repeat."
+  try /usr/bin/defaults write -g NSWindowResizeTime -float 0.001 || true
+  try /usr/bin/defaults write -g NSAutomaticWindowAnimationsEnabled -bool false || true
+  try /usr/bin/defaults write com.apple.universalaccess reduceTransparency -bool true || true
+  try /usr/bin/defaults write com.apple.universalaccess reduceMotion -bool true || true
+  try /usr/bin/defaults write -g KeyRepeat -int 2 || true
+  try /usr/bin/defaults write -g InitialKeyRepeat -int 15 || true
+  try /usr/bin/defaults write -g ApplePressAndHoldEnabled -bool false || true
+  try /usr/bin/defaults write -g AppleShowScrollBars -string "Always" || true
+  try /usr/bin/defaults write NSGlobalDomain com.apple.springing.enabled -bool true || true
+  try /usr/bin/defaults write NSGlobalDomain com.apple.springing.delay -float 0.2 || true
+  try /usr/bin/defaults write com.apple.dock launchanim -bool false || true
+  try /usr/bin/defaults write com.apple.dock expose-animation-duration -float 0.1 || true
+  try /usr/bin/defaults write com.apple.dock mineffect -string "scale" || true
+  try /usr/bin/defaults write com.apple.dock autohide -bool false || true
+  try /usr/bin/defaults write com.apple.dock show-recents -bool false || true
+  try /usr/bin/defaults write com.apple.dock mru-spaces -bool false || true
+  try /usr/bin/defaults write com.apple.dock minimize-to-application -bool true || true
+  try /usr/bin/defaults write com.apple.finder DisableAllAnimations -bool true || true
+  try /usr/bin/defaults write com.apple.finder ShowPathbar -bool true || true
+  try /usr/bin/defaults write com.apple.finder _FXShowPosixPathInTitle -bool true || true
+  try /usr/bin/defaults write com.apple.finder ShowStatusBar -bool true || true
+  try /usr/bin/defaults write NSGlobalDomain AppleShowAllExtensions -bool true || true
+  try /usr/bin/defaults write com.apple.finder AppleShowAllFiles -bool true || true
+  try /usr/bin/defaults write com.apple.finder FXDefaultSearchScope -string "SCcf" || true
+  try /usr/bin/defaults write com.apple.finder _FXSortFoldersFirst -bool true || true
+  try /usr/bin/defaults write com.apple.finder FXEnableExtensionChangeWarning -bool true || true
+  try /usr/bin/defaults write com.apple.finder NewWindowTarget -string "PfHm" || true
+  try /usr/bin/defaults write com.apple.finder NewWindowTargetPath -string "file://$HOME/" || true
+  try /usr/bin/defaults write com.apple.desktopservices DSDontWriteNetworkStores -bool true || true
+  try /usr/bin/defaults write com.apple.desktopservices DSDontWriteUSBStores -bool true || true
+  try /usr/bin/chflags nohidden "$HOME/Library" || true
+  set +e; /usr/bin/killall Dock 2>/dev/null || true; /usr/bin/killall Finder 2>/dev/null || true; /usr/bin/killall SystemUIServer 2>/dev/null || true; set -e
+  applied "Performance defaults (Dock/Finder/SystemUIServer restarted). Some changes may need a logout/restart."
+fi
+
+# Part 13: Cleanup tasks (optional)
+if (( DO_CLEAN )); then
+  title "1. Homebrew"
+  if have brew; then
+    cache_dir=$(brew --cache 2>/dev/null || true)
+    hb_before=0; hb_after=0
+    [[ -n "$cache_dir" ]] && hb_before=$(size_of_dir_bytes "$cache_dir")
+    if brew commands --quiet 2>/dev/null | /usr/bin/grep -qx "autoremove"; then
+      try brew autoremove
+    else
+      skip "'brew autoremove' not supported on this Homebrew"
+    fi
+    try brew cleanup -s --prune=all
+    if brew help cleanup 2>/dev/null | /usr/bin/grep -q -- "prune-prefix"; then
+      try brew cleanup --prune-prefix
+    fi
+    [[ -n "$cache_dir" ]] && hb_after=$(size_of_dir_bytes "$cache_dir")
+    if [[ -n "$cache_dir" ]]; then
+      report_freed_from "Homebrew cache" "$hb_before" "$hb_after"
+    else
+      applied "Homebrew cleanup"
+    fi
+  else
+    skip "Homebrew not found"
+  fi
+
+  title "2. User caches"
+  purge_dir_list_contents "User caches" "$HOME/Library/Caches"
+  purge_pruned_cache_dirs "App container caches" "$HOME/Library/Containers" "*/Data/Library/Caches"
+
+  title "3. Logs"
+  purge_find_aggregate "User logs (>14d)" "$HOME/Library/Logs" -mtime +14
+  purge_logs_older_than_in_dirs "App container logs (>14d)" "$HOME/Library/Containers" "*/Data/Library/Logs" 14
+
+  title "4. Xcode & Simulator caches"
+  purge_dir_list_contents "Xcode/Simulator caches" \
+    "$HOME/Library/Developer/Xcode/DerivedData" \
+    "$HOME/Library/Developer/CoreSimulator/Caches"
+  if [[ -d "$HOME/Library/Developer/Xcode/iOS Device Logs" ]]; then
+    purge_dir_list_contents "Xcode device logs" "$HOME/Library/Developer/Xcode/iOS Device Logs"
+  fi
+  if have xcrun; then
+    if try /usr/bin/xcrun simctl delete unavailable >/dev/null 2>&1; then
+      applied "Removed unavailable simulators."
+    else
+      info "No unavailable simulators (or simctl failed)."
+    fi
+  fi
+  if [[ -d "$HOME/Library/Developer/Xcode/DerivedData/ModuleCache.noindex" ]]; then
+    purge_dir_list_contents "Xcode module cache" "$HOME/Library/Developer/Xcode/DerivedData/ModuleCache.noindex"
+  fi
+  if [[ -d "$HOME/Library/Developer/Xcode/Archives" ]]; then
+    purge_dirs_older_than "Xcode archives (>30d)" "$HOME/Library/Developer/Xcode/Archives" 30
+  fi
+
+  title "5. System caches (sudo)"
+  info "Cleaning /Library/Caches (admin rights required)."
+  if have sudo; then
+    set +e
+    if ! sudo -v 2>/dev/null; then
+      skip "sudo authentication declined for /Library/Caches"
+    else
+      if [[ -L "/Library/Caches" ]]; then
+        warn "/Library/Caches is a symlink ($(/bin/readlink /Library/Caches 2>/dev/null)). Skipping."
+      else
+        report_freed_exec "System caches (/Library/Caches)" _purge_dir_contents_core_sudo "/Library/Caches" "root:wheel" "755"
+      fi
+    fi
+    set -e
+  else
+    skip "sudo not available for /Library/Caches"
+  fi
+
+  title "6. Launch Services"
+  info "Rebuilding Launch Services database to clean up 'Open With' duplicates."
+  set +e
+  LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+  if [[ -x "$LSREGISTER" ]]; then
+    "$LSREGISTER" -kill -r -domain local -domain system -domain user >/dev/null 2>&1; applied "Launch Services database rebuild."
+  else
+    skip "lsregister tool not found (Launch Services rebuild)"
+  fi
+  set -e
+
+  title "7. Trash"
+  info "Purging Trash directly (faster and more reliable)."
+  purge_dir_list_contents "User Trash" "$HOME/.Trash"
+  report_freed_exec "External volume trashes" _purge_external_trashes_core
+  applied "Trash emptied"
+
+  title "8. iOS backups"
+  BACKUP_DIR="$HOME/Library/Application Support/MobileSync/Backup"
+  if [[ -d "$BACKUP_DIR" ]]; then
+    purge_dirs_older_than "iOS backups (>${BACKUP_AGE_DAYS}d)" "$BACKUP_DIR" "$BACKUP_AGE_DAYS"
+  else
+    skip "No iOS backups found"
+  fi
+
+  title "9. APFS local snapshots"
+  if have tmutil; then
+    if have sudo; then
+      if try sudo -v; then
+        try sudo /usr/bin/tmutil thinlocalsnapshots / "$SNAPSHOT_THIN_TARGET_BYTES" 4 >/dev/null 2>&1 || true
+        applied "APFS local snapshots thinning."
+      else
+        skip "APFS snapshot thinning (sudo declined)"
+      fi
+    else
+      skip "APFS snapshot thinning (no sudo)"
+    fi
+  else
+    skip "tmutil not found (APFS snapshot thinning)"
+  fi
+
+  title "10. Cloud storage caches"
+  typeset -a DROPBOX_CACHES
+  DROPBOX_CACHES=(
+    "$HOME/Dropbox/.dropbox.cache"
+    "$HOME/Library/CloudStorage/Dropbox/.dropbox.cache"
+  )
+  purge_dir_list_contents "Dropbox cache" "${DROPBOX_CACHES[@]}"
+
+  set +e
+  total_gd=0
+  while IFS= read -r -d '' acc; do
+    d="$acc/.tmp.drivedownload"
+    if [[ -d "$d" ]]; then
+      freed=$(_purge_dir_contents_core "$d")
+      total_gd=$((total_gd + ${freed:-0}))
+    fi
+  done < <(/usr/bin/find "$HOME/Library/CloudStorage" -maxdepth 1 -type d -name 'GoogleDrive*' -print0 2>/dev/null)
+  set -e
+  report_freed_total "Google Drive temp downloads" "${total_gd:-0}"
+
+  title "11. Dev & package manager caches"
+  typeset -a DEV_CACHES
+  DEV_CACHES=(
+    "$HOME/.npm/_cacache"
+    "$HOME/Library/Caches/Yarn"
+    "$HOME/Library/pnpm/store"
+    "$HOME/Library/Caches/pip"
+  )
+  purge_dir_list_contents "Dev caches" "${DEV_CACHES[@]}"
+
+  typeset -a CHAT_CACHES
+  CHAT_CACHES=(
+    "$HOME/Library/Application Support/Slack/Cache"
+    "$HOME/Library/Application Support/Slack/Service Worker/CacheStorage"
+    "$HOME/Library/Application Support/Slack/Code Cache"
+    "$HOME/Library/Application Support/Slack/GPUCache"
+    "$HOME/Library/Application Support/Discord/Cache"
+    "$HOME/Library/Application Support/Discord/Service Worker/CacheStorage"
+    "$HOME/Library/Application Support/Discord/Code Cache"
+    "$HOME/Library/Application Support/Discord/GPUCache"
+  )
+  purge_dir_list_contents "Chat app caches (Slack/Discord)" "${CHAT_CACHES[@]}"
+
+  title "12. Docker"
+  if have docker; then
+    try docker container prune -f --filter "until=${DOCKER_PRUNE_UNTIL_HOURS}h" >/dev/null 2>&1 || true
+    try docker image prune -af --filter "until=${DOCKER_PRUNE_UNTIL_HOURS}h" >/dev/null 2>&1 || true
+    applied "Pruned Docker containers/images older than ${DOCKER_PRUNE_UNTIL_HOURS}h (~$(( DOCKER_PRUNE_UNTIL_HOURS / 24 ))d). Volumes left untouched."
+  else
+    skip "Docker not found (Docker cleanup)"
+  fi
+fi
+
+# End (summary printed by EXIT trap)
