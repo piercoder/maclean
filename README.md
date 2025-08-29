@@ -1,6 +1,4 @@
-# ![Shell](https://img.shields.io/badge/shell-zsh-blue)
-# ![macOS](https://img.shields.io/badge/macOS-Sequoia-green)
-# ![License: MIT](https://img.shields.io/badge/license-MIT-yellow)
+![Shell](https://img.shields.io/badge/shell-zsh-blue) ![macOS](https://img.shields.io/badge/macOS-Sequoia-green) ![License: MIT](https://img.shields.io/badge/license-MIT-yellow)
 # maclean
 
 ## A dev-friendly macOS cleanup script with sane defaults
