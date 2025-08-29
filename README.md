@@ -8,6 +8,7 @@ It reclaims disk space, clears caches/logs, prunes Docker/Xcode leftovers, thins
 ⸻
 
 ✨ Features
+
 	•	Cleanup tasks
 	•	Purge user/system caches and old logs
 	•	Clear Trash (local + external volumes)
@@ -44,6 +45,7 @@ Default behavior: with no flags, --clean is assumed.
 ⸻
 
 ⚙️ Environment Variables
+
 	•	BACKUP_AGE_DAYS — Prune iOS backups older than N days (default: 90)
 	•	DOCKER_PRUNE_UNTIL_HOURS — Prune Docker images/containers older than N hours (default: 720)
 	•	SNAPSHOT_THIN_TARGET_BYTES — Target bytes to reclaim from APFS snapshots (default: 5000000000)
@@ -52,12 +54,14 @@ Default behavior: with no flags, --clean is assumed.
 ⸻
 
 📋 Requirements
+
 	•	macOS + zsh
 	•	Optional: Homebrew, Xcode tools, Docker, sudo, tmutil
 
 ⸻
 
 🛡️ Safety Notes
+
 	•	Never run as root — the script will refuse.
 	•	System caches & APFS thinning will prompt for sudo.
 	•	Most defaults take effect immediately; some may require logout/restart.
