@@ -1,0 +1,81 @@
+macOS system files
+
+.DS_Store
+.AppleDouble
+.LSOverride
+.Spotlight-V100
+.Trashes
+Icon?
+._*
+
+VS Code settings
+
+.vscode/
+.history/
+
+Logs & temp files
+
+*.log
+*.swp
+*.swo
+*~
+*.tmp
+
+Python caches
+
+__pycache__/
+*.py[cod]
+
+Node / JS
+
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+Homebrew cache
+
+brew/
+
+Docker
+
+.docker/
+
+Ignore compiled binaries
+
+*.o
+*.out
+*.class
+*.exe
+
+Ignore archives
+
+*.zip
+*.tar
+*.gz
+*.rar
+
+# Python virtual environments
+venv/
+.venv/
+
+# Environment files
+.env
+.env.local
+
+# Build directories
+dist/
+build/
+
+# Jupyter notebooks
+.ipynb_checkpoints/
+
+# Coverage and test outputs
+coverage/
+.pytest_cache/
+junit.xml
+
+# OS / Linux files
+Thumbs.db
+.fseventsd
