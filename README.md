@@ -1,6 +1,6 @@
-maclean
+# maclean
 
-Dev-friendly macOS cleanup & sane defaults.
+## Dev-friendly macOS cleanup & sane defaults.
 
 maclean is a shell script that helps developers keep their macOS environment fast and tidy.
 It reclaims disk space, clears caches/logs, prunes Docker/Xcode leftovers, thins APFS snapshots, and applies sane Finder/Dock defaults.
