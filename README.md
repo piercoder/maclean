@@ -44,18 +44,25 @@ chmod +x maclean
 ./maclean --help
 ```
 
+Optionally, symlink to your PATH for global usage:
+```bash
+ln -s $(pwd)/maclean /usr/local/bin/maclean
+```
+
+---
+
 ## 🚀 Usage
 
 ./maclean [--clean] [--defaults] [--all] [--help]
 
-Flags
-
-```txt
+```
 --clean       Run cleanup tasks (disk, caches, logs, Trash, Docker, Xcode)
 --defaults    Apply performance defaults (UI/animation tweaks, Finder/Dock)
 --all         Run both cleanup and defaults
 -h, --help    Show help and exit
 ```
+
+---
 
 ### Examples
 
@@ -66,7 +73,7 @@ Flags
 DOCKER_PRUNE_UNTIL_HOURS=48 ./maclean --clean   # Clean with custom Docker prune threshold
 ```
 
-Default behavior: with no flags, --clean is assumed.
+If no flag is provided, --clean is run by default.
 
 ---
 
