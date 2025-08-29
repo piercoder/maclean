@@ -7,7 +7,7 @@ It reclaims disk space, clears caches/logs, prunes Docker/Xcode leftovers, thins
 
 ⸻
 
-✨ Features
+## ✨ Features
 
 	•	Cleanup tasks
 	•	Purge user/system caches and old logs
@@ -30,7 +30,7 @@ It reclaims disk space, clears caches/logs, prunes Docker/Xcode leftovers, thins
 
 ⸻
 
-🚀 Usage
+## 🚀 Usage
 
 ./maclean [--clean] [--defaults] [--all] [-h|--help]
 
@@ -45,7 +45,7 @@ Default behavior: with no flags, --clean is assumed.
 
 ⸻
 
-⚙️ Environment Variables
+## ⚙️ Environment Variables
 
 	•	BACKUP_AGE_DAYS — Prune iOS backups older than N days (default: 90)
 	•	DOCKER_PRUNE_UNTIL_HOURS — Prune Docker images/containers older than N hours (default: 720)
@@ -54,14 +54,14 @@ Default behavior: with no flags, --clean is assumed.
 
 ⸻
 
-📋 Requirements
+## 📋 Requirements
 
 	•	macOS + zsh
 	•	Optional: Homebrew, Xcode tools, Docker, sudo, tmutil
 
 ⸻
 
-🛡️ Safety Notes
+## 🛡️ Safety Notes
 
 	•	Never run as root — the script will refuse.
 	•	System caches & APFS thinning will prompt for sudo.
@@ -69,7 +69,7 @@ Default behavior: with no flags, --clean is assumed.
 
 ⸻
 
-📄 License
+## 📄 License
 
 MIT © Pierpaolo Pattitoni
 github.com/piercoder
