@@ -35,6 +35,7 @@ It reclaims disk space, clears caches/logs, prunes Docker/Xcode leftovers, thins
 ./maclean [--clean] [--defaults] [--all] [-h|--help]
 
 Flags
+
 	•	--clean → Run cleanup tasks (disk, caches, logs, Trash, Docker, Xcode)
 	•	--defaults → Apply performance defaults (UI/animation tweaks, Finder/Dock)
 	•	--all → Run both cleanup and defaults
