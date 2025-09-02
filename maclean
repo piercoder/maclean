@@ -167,7 +167,7 @@ purge_dirs_older_than(){ local label="$1" root="$2" days="$3"; set +e; local byt
 
 # Part 11: Runtime info + traps
 macos_version=$(sw_vers -productVersion 2>/dev/null || echo "unknown")
-before_free_str="$(human_df)"; info "maclean running on macOS ${macos_version}"
+before_free_str="$(human_df)"; info "${bold}${red}maclean${reset} running on macOS ${macos_version}"
 start_time=$(now)
 cleanup_summary(){ if [[ -n "${_MACLEAN_SUMMARY_PRINTED:-}" ]]; then return 0; fi; _MACLEAN_SUMMARY_PRINTED=1; say ""; if (( DO_CLEAN )); then say "${bold}Cleanup complete.${reset}"; elif (( DO_DEFAULTS )); then say "${bold}Defaults applied.${reset}"; else say "${bold}Done.${reset}"; fi; local after_free_str elapsed; after_free_str="$(human_df 2>/dev/null || echo "N/A")"; elapsed=$(( $(now) - start_time )); if (( DO_CLEAN )); then say "Disk before: ${yellow}${before_free_str}${reset}"; say "Disk after:  ${green}${after_free_str}${reset}"; say "Estimated freed by this run: ${green}~$(bytes_to_gib "$TOTAL_FREED") GiB${reset}"; fi; say "Elapsed: ${cyan}$(fmt_secs "$elapsed")${reset}"; }
 trap ' if (( DO_CLEAN && DO_DEFAULTS )); then err "Interrupted. Defaults and cleanup may be incomplete."; elif (( DO_CLEAN )); then err "Interrupted. Cleanup may be incomplete."; elif (( DO_DEFAULTS )); then err "Interrupted. Defaults application may be incomplete."; else err "Interrupted."; fi; exit 1 ' INT
