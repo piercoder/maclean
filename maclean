@@ -198,6 +198,7 @@ if (( DO_DEFAULTS )); then
   try /usr/bin/defaults write com.apple.finder ShowPathbar -bool true || true
   try /usr/bin/defaults write com.apple.finder _FXShowPosixPathInTitle -bool true || true
   try /usr/bin/defaults write com.apple.finder ShowStatusBar -bool true || true
+  try /usr/bin/defaults write com.apple.finder FXPreferredViewStyle -string "Nlsv" || true
   try /usr/bin/defaults write NSGlobalDomain AppleShowAllExtensions -bool true || true
   try /usr/bin/defaults write com.apple.finder AppleShowAllFiles -bool true || true
   try /usr/bin/defaults write com.apple.finder FXDefaultSearchScope -string "SCcf" || true
